@@ -16,6 +16,9 @@
 #define WS_PORT       8765
 #define WS_PATH       "/"
 
+enum SystemState { PRE_WIFI_CONNECTING, WIFI_CONNECTING, PRE_SERVER_CONNECTING, SERVER_CONNECTING, RUNNING };
+SystemState system_state = PRE_WIFI_CONNECTING;
+
 // Unique build-time identifier to match against incoming messages
 static const char* BUILD_ID = "DEVICE_ABC_123";
 
@@ -23,21 +26,29 @@ bool led_state = false;
 
 // Choose the LED pin for your board. Many ESP32 dev boards use GPIO 2.
 const int LED_PIN = 2;
+const int CH0_PIN = 3;
+const int CH1_PIN = 4;
+
+// Approach 1: pure millis(), LED is a function of time+mode.
+enum Mode { SOLID, FAST, SLOW, PERIODIC, OFFMODE };
+Mode mode = FAST;            // change at runtime as needed
+uint32_t now;
+
+bool ledFunc(Mode m, uint32_t t) {
+  switch (m) {
+    case SOLID:     return true;
+    case OFFMODE:   return false;
+    case FAST:      return (t % 200) < 100;          // 100 on, 100 off
+    case SLOW:      return (t % 1000) < 500;         // 500 on, 500 off
+    case PERIODIC:  return (t % 5000) < 1000 && (t % 5000) % 100 < 50;       //Every 4s, blink for 50ms repeatedly for 1s
+  }
+  return false;
+}
+
+
 // ======================
 
 WebSocketsClient ws;
-
-void connectWiFi() {
-  WiFi.mode(WIFI_STA);
-  WiFi.begin(WIFI_SSID, WIFI_PASS);
-  while (WiFi.status() != WL_CONNECTED) {
-    delay(250);
-
-    // TOGGLE LED
-    digitalWrite(LED_PIN, !led_state);
-    led_state = !led_state;
-  }
-}
 
 void handleMessage(const String& payload) {
   // Expect: {"id": "<str>", "state": 0.0-1.0}
@@ -75,15 +86,15 @@ void sendIds() {
 void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
   switch (type) {
     case WStype_DISCONNECTED: {
-      digitalWrite(LED_PIN, HIGH);
+      system_state = SERVER_CONNECTING;
       // will auto-reconnect based on setReconnectInterval
       break;
     }
     case WStype_CONNECTED: {
-      digitalWrite(LED_PIN, LOW);
       // Send connection message: {ids: [BUILD_ID]}
       sendIds();
-      // Optionally send a hello or register message here
+      // Set state to connected
+      system_state = RUNNING;
       break;
     }
     case WStype_TEXT: {
@@ -104,23 +115,61 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 }
 
 void setup() {
+  Serial.begin(9600);
+
   pinMode(LED_PIN, OUTPUT);
-  connectWiFi();
+  pinMode(CH0_PIN, OUTPUT);
+  pinMode(CH1_PIN, OUTPUT);
 
   // Turn off once connected
   digitalWrite(LED_PIN, LOW);
-
-  // For ws://
-  ws.begin(WS_HOST, WS_PORT, WS_PATH);
-
-  // For wss://, use:
-  // ws.beginSSL(WS_HOST, WS_PORT, WS_PATH); // optionally set SNI/certs
-
-  ws.onEvent(webSocketEvent);
-  ws.setReconnectInterval(5000);   // ms
-  ws.enableHeartbeat(15000, 3000, 2); // ping every 15s, timeout 3s, 2 misses
 }
 
 void loop() {
-  ws.loop(); // processes incoming frames and reconnects as needed
+  switch (system_state) {
+    case PRE_WIFI_CONNECTING: {
+      mode = FAST;
+      WiFi.mode(WIFI_STA);
+      WiFi.begin(WIFI_SSID, WIFI_PASS);
+      system_state = WIFI_CONNECTING;
+      break;
+    }
+    case WIFI_CONNECTING: {
+      mode = FAST;
+      if (WiFi.status() == WL_CONNECTED) {
+        system_state = PRE_SERVER_CONNECTING;
+      }
+      break;
+    }
+    case PRE_SERVER_CONNECTING: {
+      mode = SLOW;
+      ws.begin(WS_HOST, WS_PORT, WS_PATH);
+
+      ws.onEvent(webSocketEvent);
+      ws.setReconnectInterval(5000);   // ms
+      ws.enableHeartbeat(15000, 3000, 2); // ping every 15s, timeout 3s, 2 misses
+      system_state = SERVER_CONNECTING;
+      break;
+    }
+    case SERVER_CONNECTING: {
+      mode = SLOW;
+      ws.loop();
+      break;
+    }
+    case RUNNING: {
+      mode = PERIODIC;
+      ws.loop(); // processes incoming frames and reconnects as needed
+      break;
+    }
+  }
+
+  static SystemState last_state = (SystemState)-1;
+  if (system_state != last_state) {
+    Serial.println(system_state);
+    last_state = system_state;
+  }
+  
+  // Display LED Blink code based on mode
+  now = millis();
+  digitalWrite(LED_PIN, ledFunc(mode, now) ? HIGH : LOW);
 }
