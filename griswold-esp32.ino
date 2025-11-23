@@ -6,6 +6,8 @@
 #include <WiFi.h>
 #include <WebSocketsClient.h>
 #include <ArduinoJson.h>
+#include <map>
+#include <string>
 
 // ==== CONFIGURE ME ====
 #define WIFI_SSID     "Hearthside"
@@ -19,15 +21,14 @@
 enum SystemState { PRE_WIFI_CONNECTING, WIFI_CONNECTING, PRE_SERVER_CONNECTING, SERVER_CONNECTING, RUNNING };
 SystemState system_state = PRE_WIFI_CONNECTING;
 
-// Unique build-time identifier to match against incoming messages
-static const char* BUILD_ID = "DEVICE_ABC_123";
+const String MAC_ADDRESS_STRING = String(ESP.getEfuseMac());
+
+const uint8_t CHANNELS[] = {13, 14};
 
 bool led_state = false;
 
 // Choose the LED pin for your board. Many ESP32 dev boards use GPIO 2.
 const int LED_PIN = 2;
-const int CH0_PIN = 3;
-const int CH1_PIN = 4;
 
 // Approach 1: pure millis(), LED is a function of time+mode.
 enum Mode { SOLID, FAST, SLOW, PERIODIC, OFFMODE };
@@ -56,26 +57,63 @@ void handleMessage(const String& payload) {
   DeserializationError err = deserializeJson(doc, payload);
   if (err) return;
 
-  const char* id = doc["id"];
+  const String id = String(doc["id"]);
   if (!id) return;
 
   // read state as float; default to -1.0 if absent
   float state = doc["state"] | -1.0f;
   if (state < 0.0f) return;
 
-  if (strcmp(id, BUILD_ID) == 0) {
-    if (state > 0.5f) {
-      digitalWrite(LED_PIN, HIGH);
-    } else {
-      digitalWrite(LED_PIN, LOW);
+  int delimeter_index = id.indexOf('-');
+  if (delimeter_index == -1) {
+    Serial.println("Invalid message");
+    return;
+  }
+
+  // Expect message in format <MAC_ADDRESS>-<CHANNEL>, ex. 43891384943-13
+  const String mac_string = id.substring(0, delimeter_index);
+  const String channel_string = id.substring(delimeter_index+1);
+
+  // If the message was not meant for this device, ignore it
+  if (mac_string.compareTo(MAC_ADDRESS_STRING) != 0) {
+    Serial.println("Message not meant for this device, ignoring.");
+    return;
+  }
+
+  long tmp = channel_string.toInt();
+  if (tmp < 0 || tmp > 255) {
+    Serial.println("Bad channel value, ignoring.");
+    return;
+  }
+  uint8_t channel = (uint8_t)tmp;
+
+  for(int i = 0; i < sizeof(CHANNELS) / sizeof(CHANNELS[0]); i++) {
+    if (channel == CHANNELS[i]) {
+      Serial.print("Setting Channel ");
+      Serial.print(channel);
+      Serial.print(" to ");
+      Serial.println(state);
+      if (state > 0.5f) {
+        digitalWrite(channel, HIGH);
+      } else {
+        digitalWrite(channel, LOW);
+      }
+      // Once we set the state, return
+      return;
     }
   }
+
+  Serial.print("Channel ");
+  Serial.print(channel);
+  Serial.println(" is not one of the registered channels. Ignoring.");
 }
 
 void sendIds() {
   StaticJsonDocument<96> doc;           // enough for {"ids":["..."]}
   JsonArray arr = doc.createNestedArray("ids");
-  arr.add(BUILD_ID);
+  for(int i = 0; i < sizeof(CHANNELS) / sizeof(CHANNELS[0]); i++) {
+    arr.add(MAC_ADDRESS_STRING + "-" + String(CHANNELS[i]));
+  }
 
   // Option A: no dynamic heap after doc
   char buf[96];
@@ -91,7 +129,7 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
       break;
     }
     case WStype_CONNECTED: {
-      // Send connection message: {ids: [BUILD_ID]}
+      // Send connection message: {ids: [ESP.getEfuseMac()]}
       sendIds();
       // Set state to connected
       system_state = RUNNING;
@@ -115,11 +153,15 @@ void webSocketEvent(WStype_t type, uint8_t * payload, size_t length) {
 }
 
 void setup() {
-  Serial.begin(9600);
+  Serial.begin(115200);
+
+  uint64_t mac_esp_efuse = ESP.getEfuseMac();
+  Serial.printf("ESP32 Chip MAC (from efuse): %012llx \n", mac_esp_efuse);
 
   pinMode(LED_PIN, OUTPUT);
-  pinMode(CH0_PIN, OUTPUT);
-  pinMode(CH1_PIN, OUTPUT);
+  for(int i = 0; i < sizeof(CHANNELS) / sizeof(CHANNELS[0]); i++) {
+    pinMode(CHANNELS[i], OUTPUT);
+  }
 
   // Turn off once connected
   digitalWrite(LED_PIN, LOW);
@@ -131,6 +173,7 @@ void loop() {
       mode = FAST;
       WiFi.mode(WIFI_STA);
       WiFi.begin(WIFI_SSID, WIFI_PASS);
+      WiFi.setSleep(false); 
       system_state = WIFI_CONNECTING;
       break;
     }
