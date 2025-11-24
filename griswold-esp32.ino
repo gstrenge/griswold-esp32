@@ -14,7 +14,7 @@
 #define WIFI_PASS     ""
 
 // Example: ws://example.com:8080/path
-#define WS_HOST       "192.168.1.210"
+#define WS_HOST       "192.168.1.10"
 #define WS_PORT       8765
 #define WS_PATH       "/"
 
@@ -41,7 +41,7 @@ bool ledFunc(Mode m, uint32_t t) {
     case OFFMODE:   return false;
     case FAST:      return (t % 200) < 100;          // 100 on, 100 off
     case SLOW:      return (t % 1000) < 500;         // 500 on, 500 off
-    case PERIODIC:  return (t % 5000) < 1000 && (t % 5000) % 100 < 50;       //Every 4s, blink for 50ms repeatedly for 1s
+    case PERIODIC:  return (t % 60000) < 1000 && (t % 60000) % 1000 < 100;       //Every 60s, blink once for 100ms
   }
   return false;
 }
